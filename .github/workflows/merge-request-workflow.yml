@@ -1,0 +1,108 @@
+name: Merge request workflow
+
+# on:
+#   push:
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+      - test
+      - main
+    paths-ignore:
+      - '.github/workflows/**'
+
+jobs:
+  merge-request-call-helper-api:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install dependencies
+        run: npm install @actions/github
+
+
+      - name: Extract Git Repo Details
+        id: extract_info
+        run: |
+          REPO_NAME=$(basename ${GITHUB_REPOSITORY})
+          REPO_NAME=$(echo "${REPO_NAME^}" | sed 's/-apis//')
+          REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          echo "REPOSITORY_NAME=${REPO_NAME}" >> $GITHUB_ENV
+          echo "TARGET_BRANCH_NAME=${{ github.event.pull_request.base.ref }}" >> $GITHUB_ENV
+          echo "REPOSITORY_URL=${REPO_URL}" >> $GITHUB_ENV
+          echo "PULL_REQUEST_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+
+      - name: Check Target Branch and Retrieve Secrets
+        run: |
+          TARGET_BRANCH="${{ github.event.pull_request.base.ref }}"
+          if [[ "$TARGET_BRANCH" == "develop" || "$TARGET_BRANCH" == "test" ]]; then
+            CLIENT_ID="${{ secrets.TOKEN_NPRD_CLIENT_ID }}"
+            CLIENT_SECRET="${{ secrets.TOKEN_NPRD_CLIENT_SECRET }}"
+            TOKEN_URL="${{ secrets.TOKEN_NPRD_URL }}"
+            HELPER_SERVICE_URL="${{ secrets.HELPER_SERVICE_MERGE_NPRD_URL }}"
+          elif [[ "$TARGET_BRANCH" == "main" ]]; then
+            CLIENT_ID="${{ secrets.TOKEN_PRD_CLIENT_ID }}"
+            CLIENT_SECRET="${{ secrets.TOKEN_PRD_CLIENT_SECRET }}"
+            TOKEN_URL="${{ secrets.TOKEN_PRD_URL }}"
+            HELPER_SERVICE_URL="${{ secrets.HELPER_SERVICE_MERGE_PRD_URL }}"
+          else
+            echo "No secrets found for the target branch: $TARGET_BRANCH"
+            exit 1
+          fi
+          echo "TARGET_BRANCH=$TARGET_BRANCH" >> $GITHUB_ENV
+          echo "CLIENT_ID=$CLIENT_ID" >> $GITHUB_ENV
+          echo "CLIENT_SECRET=$CLIENT_SECRET" >> $GITHUB_ENV
+          echo "TOKEN_URL=$TOKEN_URL" >> $GITHUB_ENV
+          echo "HELPER_SERVICE_URL=$HELPER_SERVICE_URL" >> $GITHUB_ENV
+
+      - name: Get OAuth token
+        id: get_token
+        run: |
+          # Make a request to your token service to obtain a token
+          TOKEN=$(curl -X POST -u "${CLIENT_ID}:${CLIENT_SECRET}" -d "grant_type=client_credentials" "${TOKEN_URL}")
+          if [ $? -ne 0 ]; then
+            echo "Failed to obtain OAuth token."
+            exit 1
+          fi
+          echo "TOKEN=$(echo $TOKEN | jq -r '.access_token')" >> $GITHUB_ENV
+
+
+      - name: Call Helper API
+        id: call_api
+        env:
+          REPOSITORY_NAME: ${{ env.REPOSITORY_NAME }}
+          TARGET_BRANCH_NAME: ${{ env.TARGET_BRANCH_NAME }}
+          REPOSITORY_URL: ${{ env.REPOSITORY_URL }}
+          PULL_REQUEST_NUMBER: ${{ env.PULL_REQUEST_NUMBER }}
+          TOKEN: ${{ env.TOKEN }}
+        run: |
+          # Construct JSON payload
+          JSON_PAYLOAD="{\"domainName\":\"${REPOSITORY_NAME}\",\"domainGitRepo\":\"${REPOSITORY_URL}\",\"domainTargetGitBranch\":\"${TARGET_BRANCH_NAME}\",\"prNumber\":\"${PULL_REQUEST_NUMBER}\"}"
+          
+          API_RESPONSE=$(curl -s -X POST -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d "${JSON_PAYLOAD}" "${HELPER_SERVICE_URL}")
+          echo "Status: $(echo $API_RESPONSE | jq -r '.status')"
+          echo "Trace ID: $(echo $API_RESPONSE | jq -r '.traceId')"
+          if [ "$(echo $API_RESPONSE | jq -r '.status')" == "ERROR" ]; then
+            # echo "::error::API call failed with errors: $(echo $API_RESPONSE | jq -r '.errors | join(", ")')"
+            echo "::error::API call to Helper API failed with errors, refer to PR comments for details"
+            exit 1
+          fi
+
+      - name: Merge pull request
+        id: merge_pull_request
+        if: success() # Only merge if all previous steps are successful
+        env:
+          PULL_REQUEST_NUMBER: ${{ env.PULL_REQUEST_NUMBER }}
+        run: |
+          # Merge the pull request using GitHub API
+          curl -X PUT \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST_NUMBER}/merge"
+
+
+
