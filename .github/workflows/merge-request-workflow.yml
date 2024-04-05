@@ -11,6 +11,12 @@ on:
       - main
     paths-ignore:
       - '.github/workflows/**'
+  merge_group:
+    branches:
+      - develop
+      - test
+      - main
+    
 
 jobs:
   merge-request-call-helper-api:
